@@ -1,0 +1,5 @@
+dbname: datos_eje
+user: postgres
+password: Postgres01
+host: localhost
+port: 5432
