@@ -36,8 +36,13 @@ def cargar_configuracion_db(config_file_path):
     except Exception as e:
         print(f"Error al cargar la configuración de la base de datos: {e}")
         return None
+"""
+SI TENGO EL ID DEL JUICIO, CON ESTO LE PEGO A LA API QUE ME TRAE EL JSON CON LAS ACTUACIONES 
+ 
+EL ULTIMO PARAMETRO, PAGE, ME DICE CUANTAS ACTUACIONES TRAE LA API
 
-
+https://eje.juscaba.gob.ar/iol-api/api/public/expedientes/actuaciones?filtro=%7B%22cedulas%22%3Atrue%2C%22escritos%22%3Atrue%2C%22despachos%22%3Atrue%2C%22notas%22%3Atrue%2C%22expId%22%3A{ID DEL EXPEDIENTE}%2C%22accesoMinisterios%22%3Afalse%2C%22fechaNotificacionDesde%22%3Anull%2C%22fechaNotificacionHasta%22%3Anull%7D&page=0&size=5
+"""
 # Función para procesar una clave
 def procesar_clave(driver, clave, fecha_limite, abogado, datos_tabla):
     print(f"Procesando clave: {clave}")  # Mostrar la clave que se está procesando
@@ -104,75 +109,34 @@ def procesar_clave(driver, clave, fecha_limite, abogado, datos_tabla):
             break
         return True
 
+def cambiarfecha(fechadma):
+    f0 = fechadma[:10]
+    f1 = f0.split("/")
+    #print(f1)
+    return f1[2]+'/'+f1[1]+'/'+f1[0] +fechadma[10:]
+
 # Función para insertar datos en la base de datos
-def insertar_datos_en_db(db_params, clave, datos_tabla):
-    try:
-        connection = psycopg2.connect(**db_params)
-        cursor = connection.cursor()
+def insertar_en_buffer(id_juicio, clave, datos_tabla):
+    for row in datos_tabla:
+        # Obtener los datos de la fila procesada
+        cuij = row[0]  # Clave
+        titulo = row[1]
+        numero = row[2]
+        fecha_firma = row[3]
+        firmantes = row[4]
+        fecha_diligenciamiento = row[-1]  # Última posición en la fila
 
-        for row in datos_tabla:
-            # Obtener los datos de la fila procesada
-            cuij = row[0]  # Clave
-            titulo = row[1]
-            numero = row[2]
-            fecha_firma = row[3]
-            firmantes = row[4]
-            fecha_diligenciamiento = row[-1]  # Última posición en la fila
-            # Validar que la fecha de firma no esté vacía y tenga un formato válido antes de insertarla
-            if fecha_firma and fecha_firma.strip():
-                # Intentar insertar la fecha en ambos formatos posibles
-                try:
-                    fecha_firma = pd.to_datetime(fecha_firma, format='%d/%m/%Y %H:%M:%S').date()
-                except ValueError:
-                    try:
-                        fecha_firma = pd.to_datetime(fecha_firma, format='%d/%m/%Y').date()
-                    except ValueError:
-                        fecha_firma = None
-            else:
-                fecha_firma = None
+        if fecha_firma and fecha_firma.strip():
+           fecha_firma = cambiarfecha(fecha_firma)
+        else:
+           fecha_firma = ''
 
-            # Validar que la fecha de diligenciamiento no esté vacía y tenga un formato válido antes de insertarla
-            if fecha_diligenciamiento and fecha_diligenciamiento.strip():
-                # Intentar insertar la fecha en ambos formatos posibles
-                try:
-                    fecha_diligenciamiento = pd.to_datetime(fecha_diligenciamiento, format='%d/%m/%Y %H:%M:%S').date()
-                except ValueError:
-                    try:
-                        fecha_diligenciamiento = pd.to_datetime(fecha_diligenciamiento, format='%d/%m/%Y').date()
-                    except ValueError:
-                        fecha_diligenciamiento = None
-            else:
-                fecha_diligenciamiento = None
-
-            # Insertar datos en la tabla "public.novedades_eje"
-            insert_novedades_query = """
-            INSERT INTO public.novedades_eje (cuij, titulo, numero, fecha_firma, firmantes, fecha_diligenciamiento)
-            VALUES (%s, %s, %s, %s, %s, %s) RETURNING id;
-            """
-            values_novedades_eje = (
-                cuij,
-                titulo,
-                numero,
-                fecha_firma,
-                firmantes,
-                fecha_diligenciamiento
-            )
-            cursor.execute(insert_novedades_query, values_novedades_eje)
-            inserted_id = cursor.fetchone()[0]
-
-            # Realizar commit después de cada inserción
-            connection.commit()
-
-            print(f"Fila insertada con ID: {inserted_id}")
-
-    except (Exception, psycopg2.Error) as error:
-        print("Error al trabajar con la base de datos:", error)
-
-    finally:
-        if connection:
-            cursor.close()
-            connection.close()
-            print("Conexión a la base de datos cerrada.")
+        if fecha_diligenciamiento and fecha_diligenciamiento.strip():
+           fecha_diligenciamiento = cambiarfecha(fecha_diligenciamiento)
+        else:
+           fecha_diligenciamiento = ''
+        fila = ";".join([id_juicio, cuij, titulo, numero, fecha_firma, firmantes, fecha_diligenciamiento])+"\n"
+        bufferAInsertar.append(fila)
 
 def limpiar_nombre_abogado(nombre_abogado):
     """
@@ -211,13 +175,36 @@ def limpiar_nombre_abogado(nombre_abogado):
             validos.append(token)
     return ','.join(validos)
 
+def insertarBufferaBD(db_params, bufferAInsertar):
+            
+    archivoIntermedio = open("buffer.csv", "w")
+    archivoIntermedio.writelines(bufferAInsertar)
+    archivoIntermedio.close()
+
+    try:
+        connection = psycopg2.connect(**db_params)
+        cursor = connection.cursor()
+        #[juicio_id, cuij, titulo, numero, fecha_firma, firmantes, fecha_diligenciamiento]
+        sql = "COPY novedades_eje (juicio_id, cuij, titulo, numero, fecha_firma, firmantes, fecha_diligenciamiento) FROM STDIN WITH DELIMITER ';' CSV HEADER;"
+        with open("buffer.csv", "r") as f:
+            cursor.copy_expert(sql, file=f)
+        connection.commit()
+        print("Se insertaron los datos correctamente.")
+
+    except (Exception, psycopg2.Error) as error:
+        print("Error al copiar a la base de datos: ", error)
+
+    finally:
+        if connection:
+            cursor.close()
+            connection.close()
 
 
-# Ruta outpu
+# Ruta output
 output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pdf_files")
 
 # Obtener el total de claves en el archivo
-total_claves = obtener_total_claves("claves/claves.txt")
+total_claves = obtener_total_claves("claves/clavespaula.txt")
 
 # Crear un objeto ArgumentParser
 parser = argparse.ArgumentParser(description='Procesar expedientes y descargas.')
@@ -234,10 +221,6 @@ args = parser.parse_args()
 # Acceder al valor del argumento -procesar y -descargas
 expedientes_a_procesar = args.procesar
 ejecutar_descargas = args.descargas
-
-# Imprimir información sobre las opciones seleccionadas
-print(f"Por defecto, no realiza las descargas (-descargas para activar) y procesa todas las claves a menos que se especifique con -procesar xxx")
-
 
 # Ruta al archivo de configuración
 config_file_path = "db_config.txt"
@@ -272,30 +255,30 @@ chrome_prefs = {
 options.add_experimental_option('prefs', chrome_prefs)
 driver = webdriver.Chrome(options=options)
 
-claves_file_path = "claves/clavesconnombre.txt"
+claves_file_path = "claves/clavespaula.txt"
+ids = []
 claves = []
 fechas = []
 abogados = []
 
+bufferAInsertar = []
+
 with open(claves_file_path, 'r', encoding='utf-8') as f:
     for line in f:
-        print(line)
-        clave, fecha_str, abogado = line.split(';')
+        #print(line)
+        juicio_id, clave, fecha_str, abogado = line.split(';')
+        ids.append(juicio_id)
         claves.append(clave.strip())
         fechas.append(datetime.strptime(fecha_str.strip(), "%d/%m/%Y"))
         abogados.append(limpiar_nombre_abogado(abogado))
 
-for clave, fecha, abogado in zip(claves[:expedientes_a_procesar], fechas[:expedientes_a_procesar], abogados[:expedientes_a_procesar]):
+for juicio_id, clave, fecha, abogado in zip(ids[:expedientes_a_procesar], claves[:expedientes_a_procesar], fechas[:expedientes_a_procesar], abogados[:expedientes_a_procesar]):
     datos_tabla = []
     
     if (procesar_clave(driver, clave, fecha, abogado, datos_tabla)):
-        insertar_datos_en_db(db_params, clave, datos_tabla)
-         
-
-# Crear un DataFrame de pandas con los datos de la tabla
-# comento diego df = pd.DataFrame(datos_tabla)
-
-# Cerrar el navegador
+        insertar_en_buffer(juicio_id, clave, datos_tabla)
+        
+insertarBufferaBD(db_params, bufferAInsertar)
 driver.quit()
 
 print("Proceso completado.")
