@@ -1,6 +1,8 @@
 from seleniumwire import webdriver
 import time
+import json
 import requests
+import datetime
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
@@ -55,6 +57,22 @@ def dameJsonActuaciones(id_expediente):
     duracion = time.perf_counter() - start_time
     print (duracion)
     print(response.text)
+
+def procesar_respuesta(respuesta):
+    respuesta.replace('true', '"true"')
+    j = json.loads(respuesta)
+    actuaciones = j['content']
+    for actuacion in actuaciones:
+        numero = actuacion['numero']
+        fecha_firma = datetime.datetime.fromtimestamp(actuacion['fechaFirma']/1000).strftime("%m/%d/%Y %H:%M:%S")
+        firmantes = actuacion['firmantes']
+        titulo = actuacion['titulo']
+        if 'fechaNotificacion' in actuacion:
+            fecha_diligenciamiento  = datetime.datetime.fromtimestamp(actuacion['fechaNotificacion']/1000).strftime("%m/%d/%Y %H:%M:%S")
+        else:
+            fecha_diligenciamiento = ''
+        print(numero, fecha_firma, firmantes, titulo, fecha_diligenciamiento )    
+        datetime.datetime.fromtimestamp(1701262249807/1000)
 
 driver = webdriver.Chrome(options=setDriverOptions())
 
