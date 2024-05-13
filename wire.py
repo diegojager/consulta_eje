@@ -1,8 +1,10 @@
 from seleniumwire import webdriver
+import re
 import time
 import json
 import requests
-import datetime
+from datetime import datetime
+import psycopg2
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
@@ -15,7 +17,9 @@ from selenium.common.exceptions import TimeoutException
 #output_dir = '/home/daj/buscador-eje/archivos'
 
 config_file_path = "db_config.txt"
-bufferAInsertar = []
+bufferIds = []
+bufferActuacionesAInsertar = []
+bufferActuacionesAInsertarSinFechaDiligenciamiento = []
 claves_file_path = "claves/clavespaula.txt"
 ids = []
 claves = []
@@ -45,11 +49,28 @@ def setDriverOptions():
     options.add_experimental_option('prefs', chrome_prefs)
     return options
 
+
+    """
+    Retrieves the ID of an expediente from the Eje website based on the provided CUJ.
+    Args:
+        cuij (str): The CUiJ (Código Único de Identificación de la Justicia) of the expediente.
+    Returns:
+        str: The ID of the expediente.
+    Raises:
+        None.
+
+    Note:
+        - The function sends a GET request to the Eje website with the provided CUJ.
+        - It waits for a request to the '/eje.juscaba.gob.ar/iol-api/api/public/expedientes/accesosExpediente.*' endpoint.
+        - The function returns the value of the 'expId' parameter from the request.
+    """
 def dameIdDeExpediente(cuij):
     url = f'https://eje.juscaba.gob.ar/iol-ui/p/expedientes?identificador={cuij}&open=false&tituloBusqueda=Causas&tipoBusqueda=CAU'
+    print(url)
     #start_time = time.perf_counter()
     driver.get(url)
     rq = driver.wait_for_request('/eje.juscaba.gob.ar/iol-api/api/public/expedientes/accesosExpediente.*',10)
+    print (rq)
     #duracion = time.perf_counter() - start_time
     #print (duracion)
     #print (rq)
@@ -60,27 +81,25 @@ def cambiarfecha(fechadma):
     f1 = f0.split("/")
     #print(f1)
     return f1[2]+'/'+f1[1]+'/'+f1[0] +fechadma[10:]
-def insertar_en_buffer(id_juicio, clave, lista_actuaciones):
+
+def insertar_en_buffer(id_juicio, cuij, fecha, abogado, lista_actuaciones):
+    print (' lista de actuaciones ')
+    print (lista_actuaciones)
+    if len(lista_actuaciones):
+        abogado = limpiar_nombre_abogado(abogado)
+    
     for row in lista_actuaciones:
-        # Obtener los datos de la fila procesada
-        cuij = row[0]  # Clave
-        titulo = row[1]
-        numero = row[2]
-        fecha_firma = row[3]
-        firmantes = row[4]
-        fecha_diligenciamiento = row[-1]  # Última posición en la fila
-
-        if fecha_firma and fecha_firma.strip():
-           fecha_firma = cambiarfecha(fecha_firma)
-        else:
-           fecha_firma = ''
-
-        if fecha_diligenciamiento and fecha_diligenciamiento.strip():
-           fecha_diligenciamiento = cambiarfecha(fecha_diligenciamiento)
-        else:
-           fecha_diligenciamiento = ''
-        fila = ";".join([id_juicio, cuij, titulo, numero, fecha_firma, firmantes, fecha_diligenciamiento])+"\n"
-        bufferAInsertar.append(fila)
+        ## cada fila es un diccionario con estos datos: {'numero':numero, 'fecha_firma':fecha_firma, 'firmantes':firmantes, 'titulo':titulo, 'fecha_diligenciamiento':fecha_diligenciamiento }   
+        print("row")
+        print(row['fecha_firma'])
+        print(fecha)
+        if (row['firmantes'] != abogado) and (row['fecha_firma'] > fecha):
+            if (row['fecha_diligenciamiento']):
+                fila = ";".join([id_juicio, cuij, row['titulo'], str(row['numero']), row['fecha_firma'], row ['firmantes'],row['fecha_diligenciamiento']])+"\n"
+                bufferActuacionesAInsertar.append(fila)
+            else:
+                fila = ";".join([id_juicio, cuij, row['titulo'], str(row['numero']), row['fecha_firma'], row ['firmantes']])+"\n"
+                bufferActuacionesAInsertarSinFechaDiligenciamiento.append(fila)
 
 def limpiar_nombre_abogado(nombre_abogado):
     """
@@ -130,7 +149,8 @@ def dameJsonActuaciones(id_expediente):
     response = requests.request("GET", urlActuaciones, headers=headers, data=payload)
     duracion = time.perf_counter() - start_time
     print (duracion)
-    print(response.text)
+    #print(response.text)
+    return(response.text)
 
 """ devuelve una lista de diccionarios con todas las actuaciones que contiene la respuesta """
 def parsear_respuesta_actuaciones(respuesta):
@@ -140,14 +160,14 @@ def parsear_respuesta_actuaciones(respuesta):
     ret = []
     for actuacion in actuaciones:
         numero = actuacion['numero']
-        fecha_firma = datetime.datetime.fromtimestamp(actuacion['fechaFirma']/1000).strftime("%m/%d/%Y %H:%M:%S")
-        firmantes = actuacion['firmantes']
+        fecha_firma = datetime.fromtimestamp(actuacion['fechaFirma']/1000).strftime("%Y-%m-%d %H:%M:%S")
+        firmantes = limpiar_nombre_abogado(actuacion['firmantes'])
         titulo = actuacion['titulo']
         if 'fechaNotificacion' in actuacion:
-            fecha_diligenciamiento  = datetime.datetime.fromtimestamp(actuacion['fechaNotificacion']/1000).strftime("%m/%d/%Y %H:%M:%S")
+            fecha_diligenciamiento  = datetime.fromtimestamp(actuacion['fechaNotificacion']/1000).strftime("%Y-%m-%d %H:%M:%S")
         else:
             fecha_diligenciamiento = ''
-        ret.append {'numero':numero, 'fecha_firma':fecha_firma, 'firmantes':firmantes, 'titulo':titulo, 'fecha_diligenciamiento':fecha_diligenciamiento }    
+        ret.append({'numero':numero, 'fecha_firma':fecha_firma, 'firmantes':firmantes, 'titulo':titulo, 'fecha_diligenciamiento':fecha_diligenciamiento})
     return ret
  
 def cargar_configuracion_db(config_file_path):
@@ -163,19 +183,35 @@ def cargar_configuracion_db(config_file_path):
         print(f"Error al cargar la configuración de la base de datos: {e}")
         return None    
 
-def insertarBufferaBD(db_params, bufferAInsertar):
-            
-    archivoIntermedio = open("buffer.csv", "w")
-    archivoIntermedio.writelines(bufferAInsertar)
+def insertarBufferaBD(db_params, bufferActuacionesAInsertar,bufferActuacionesAInsertarSinFechaDiligenciamiento):
+        
+    archivoIntermedio = open("/home/pg/buffer.csv", "w")
+    archivoIntermedio.writelines(bufferActuacionesAInsertar)
     archivoIntermedio.close()
+
+    archivoIntermedio = open("/home/pg/buffersinfechadiligenciamiento.csv","w")
+    archivoIntermedio.writelines(bufferActuacionesAInsertarSinFechaDiligenciamiento)
+    archivoIntermedio.close()
+
 
     try:
         connection = psycopg2.connect(**db_params)
         cursor = connection.cursor()
+        cursor.copy_from(open("/home/pg/buffer.csv", "r"), "novedades_eje", sep=";", columns = ["juicio_id", "cuij", "titulo", "numero", "fecha_firma", "firmantes", "fecha_diligenciamiento"])
+
         #[juicio_id, cuij, titulo, numero, fecha_firma, firmantes, fecha_diligenciamiento]
-        sql = "COPY novedades_eje (juicio_id, cuij, titulo, numero, fecha_firma, firmantes, fecha_diligenciamiento) FROM STDIN WITH DELIMITER ';' CSV HEADER;"
-        with open("buffer.csv", "r") as f:
+        """sql = "COPY novedades_eje (juicio_id, cuij, titulo, numero, fecha_firma, firmantes, fecha_diligenciamiento) FROM STDIN WITH DELIMITER ';' CSV HEADER;"
+        with open("/home/pg/buffer.csv", "r") as f:
             cursor.copy_expert(sql, file=f)
+            """
+        connection.commit()
+
+        cursor.copy_from(open("/home/pg/buffersinfechadiligenciamiento.csv", "r"), "novedades_eje", sep=";", columns = ["juicio_id", "cuij", "titulo", "numero", "fecha_firma", "firmantes"])
+        """
+        sql = "COPY novedades_eje (juicio_id, cuij, titulo, numero, fecha_firma, firmantes) FROM STDIN WITH DELIMITER ';' CSV HEADER;"
+        with open("/home/pg/buffersinfechadiligenciamiento.csv", "r") as f:
+            cursor.copy_expert(sql, file=f)
+            """
         connection.commit()
         print("Se insertaron los datos correctamente.")
 
@@ -187,21 +223,47 @@ def insertarBufferaBD(db_params, bufferAInsertar):
             cursor.close()
             connection.close()
 
-def procesar_clave(driver, clave, fecha_limite, abogado, id_eje, datos_tabla):
-    print(f"Procesando clave: {clave}")  # Mostrar la clave que se está procesando
-
-    if (id_eje ==0):
+def procesar_clave( clave, id_eje):
+    print(f"Procesando : {clave}")  # Mostrar la clave que se está procesando
+    #print(' id eje <'+id_eje+'>')
+    if (id_eje == '0'):
        id_eje =  dameIdDeExpediente(clave)
-    actuacionesDelExpediente = dameJsonActuaciones(id_eje)
-    parsear_respuesta_actuaciones(actuacionesDelExpediente)
+       if (id_eje is None):
+            print('NONE!!')
+       else:
+            print('id eje = '+id_eje)
+       bufferIds.append(';'.join([clave, id_eje])+"\n")
 
-    return True
+    actuacionesDelExpediente = dameJsonActuaciones(id_eje)
+    return parsear_respuesta_actuaciones(actuacionesDelExpediente)
+
+def insertarIdsenBD(db_params, bufferIds):
+        
+    archivoIntermedio = open("/home/pg/bufferIds.csv", "w")
+    archivoIntermedio.writelines(bufferIds)
+    archivoIntermedio.close()
+
+    try:
+        connection = psycopg2.connect(**db_params)
+        cursor = connection.cursor()
+        #[juicio_id, cuij, titulo, numero, fecha_firma, firmantes, fecha_diligenciamiento]
+        sql = "COPY cruce_id_cuij (cuij, expid) FROM STDIN WITH DELIMITER ';' CSV HEADER;"
+        with open("/home/pg/bufferIds.csv", "r") as f:
+            cursor.copy_expert(sql, file=f)
+        connection.commit()
+        print("Se insertaron los datos correctamente.")
+
+    except (Exception, psycopg2.Error) as error:
+        print("Error al copiar los ids de eje a la base de datos: ", error)
+
+    finally:
+        if connection:
+            cursor.close()
+            connection.close()
 
 
 db_params = cargar_configuracion_db(config_file_path)
-if db_params:
-    print("Configuración de la base de datos cargada.")
-else:
+if not db_params:
     print("No se pudo cargar la configuración de la base de datos.")
 
 driver = webdriver.Chrome(options=setDriverOptions())
@@ -209,22 +271,27 @@ driver = webdriver.Chrome(options=setDriverOptions())
 
 
 with open(claves_file_path, 'r', encoding='utf-8') as f:
+
     for line in f:
-        #print(line)
         juicio_id, clave, fecha_str, abogado, expId = line.split(';')
         ids.append(juicio_id)
         claves.append(clave.strip())
-        fechas.append(datetime.strptime(fecha_str.strip(), "%d/%m/%Y"))
+        fechas.append(datetime.strptime(fecha_str.strip(), "%Y-%m-%d").strftime("%Y-%m-%d %H:%M:%S"))
         abogados.append(limpiar_nombre_abogado(abogado))
-        ids_eje.append(expId)
+        ids_eje.append(expId.strip())
+    print ( "A procesar " + str(len(claves)) + " expedientes" )
+
 
 for juicio_id, clave, fecha, abogado, id_eje in zip(ids, claves, fechas, abogados,ids_eje):
-    datos_tabla = []
+    del driver.requests
     
-    if (procesar_clave(driver, clave, fecha, abogado, id_eje, datos_tabla)):
-        insertar_en_buffer(juicio_id, clave, datos_tabla)
+    if (datos_tabla := procesar_clave(clave, id_eje)):
+        print ( 'datos tabla en main ')
+        print (datos_tabla)
+        insertar_en_buffer(juicio_id, clave, fecha, abogado, datos_tabla)
 
-insertarBufferaBD(db_params, bufferAInsertar)
+insertarIdsenBD(db_params, bufferIds) 
+insertarBufferaBD(db_params, bufferActuacionesAInsertar,bufferActuacionesAInsertarSinFechaDiligenciamiento)
 driver.quit()
 
 print("Proceso completado.")
