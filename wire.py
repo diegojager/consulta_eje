@@ -8,16 +8,21 @@ import psycopg2
 from selenium.common.exceptions import TimeoutException
 
 #output_dir = '/home/daj/buscador-eje/archivos'
+ahora = datetime.now()
+salida = open('horario.txt','a')
+salida.write(ahora.strftime("%d/%m/%Y, %H:%M:%S")+"\n")
+salida.close()
 
 config_file_path = "db_config.txt"
 bufferIds = []
 bufferActuacionesAInsertar = []
 bufferActuacionesAInsertarSinFechaDiligenciamiento = []
-claves_file_path = "claves/clavescuij.txt"
+claves_file_path = "/home/crono/claves/clavesdeldia.txt"
 ids = []
 claves = []
 fechas = []
 abogados = []
+clientes = []
 ids_eje = []
 
 
@@ -79,11 +84,11 @@ def cambiarfecha(fechadma):
     #print(f1)
     return f1[2]+'/'+f1[1]+'/'+f1[0] +fechadma[10:]
 
-def insertar_en_buffer(id_juicio, cuij, fecha, abogado, lista_actuaciones):
+def insertar_en_buffer(id_juicio, cuij, fecha, abogado, cliente, lista_actuaciones):
     #print (' lista de actuaciones ')
     #print (lista_actuaciones)
     if len(lista_actuaciones):
-        abogado = limpiar_nombre_abogado(abogado)
+        abogado = limpiar_nombre_abogado(abogado) 
     
     for row in lista_actuaciones:
         ## cada fila es un diccionario con estos datos: {'numero':numero, 'fecha_firma':fecha_firma, 'firmantes':firmantes, 'titulo':titulo, 'fecha_diligenciamiento':fecha_diligenciamiento }   
@@ -92,10 +97,10 @@ def insertar_en_buffer(id_juicio, cuij, fecha, abogado, lista_actuaciones):
         #print(fecha)
         if (row['firmantes'] != abogado) and (row['fecha_firma'] > fecha):
             if (row['fecha_diligenciamiento']):
-                fila = ";".join([id_juicio, cuij, row['titulo'], str(row['numero']), row['fecha_firma'], row ['firmantes'],row['fecha_diligenciamiento']])+"\n"
+                fila = ";".join([id_juicio, cliente, cuij, row['titulo'], str(row['numero']), row['fecha_firma'], row ['firmantes'],row['fecha_diligenciamiento']])+"\n"
                 bufferActuacionesAInsertar.append(fila)
             else:
-                fila = ";".join([id_juicio, cuij, row['titulo'], str(row['numero']), row['fecha_firma'], row ['firmantes']])+"\n"
+                fila = ";".join([id_juicio, cliente, cuij, row['titulo'], str(row['numero']), row['fecha_firma'], row ['firmantes']])+"\n"
                 bufferActuacionesAInsertarSinFechaDiligenciamiento.append(fila)
 
 def limpiar_nombre_abogado(nombre_abogado):
@@ -152,7 +157,12 @@ def dameJsonActuaciones(id_expediente):
 """ devuelve una lista de diccionarios con todas las actuaciones que contiene la respuesta """
 def parsear_respuesta_actuaciones(respuesta):
     respuesta.replace('true', '"true"')
-    j = json.loads(respuesta)
+    try:
+        j = json.loads(respuesta)
+    except Exception as e:
+        print(f"Error {e} al parsear la respuesta: {respuesta}")
+        return []
+
     if not ('content') in j:
         return []
 
@@ -204,9 +214,9 @@ def insertarBufferaBD(db_params, bufferActuacionesAInsertar,bufferActuacionesAIn
     try:
         connection = psycopg2.connect(**db_params)
         cursor = connection.cursor()
-        cursor.copy_from(open("/home/pg/buffer.csv", "r"), "novedades_eje", sep=";", columns = ["juicio_id", "cuij", "titulo", "numero", "fecha_firma", "firmantes", "fecha_diligenciamiento"])
+        cursor.copy_from(open("/home/pg/buffer.csv", "r"), "novedades_eje", sep=";", columns = ["juicio_id", "sys_cliente_id","cuij", "titulo", "numero", "fecha_firma", "firmantes", "fecha_diligenciamiento"])
 
-        cursor.copy_from(open("/home/pg/buffersinfechadiligenciamiento.csv", "r"), "novedades_eje", sep=";", columns = ["juicio_id", "cuij", "titulo", "numero", "fecha_firma", "firmantes"])
+        cursor.copy_from(open("/home/pg/buffersinfechadiligenciamiento.csv", "r"), "novedades_eje", sep=";", columns = ["juicio_id","sys_cliente_id", "cuij", "titulo", "numero", "fecha_firma", "firmantes"])
         connection.commit()
         print("Se insertaron los datos correctamente.")
 
@@ -219,7 +229,7 @@ def insertarBufferaBD(db_params, bufferActuacionesAInsertar,bufferActuacionesAIn
             connection.close()
 
 def procesar_clave( clave, id_eje):
-    print(f"Procesando : {clave}")  # Mostrar la clave que se está procesando
+    #print(f"Procesando : {clave}")  # Mostrar la clave que se está procesando
     #print(' id eje <'+id_eje+'>')
     if (id_eje == '0'):
        id_eje =  dameIdDeExpediente(clave)
@@ -266,23 +276,25 @@ driver = webdriver.Chrome(options=setDriverOptions())
 with open(claves_file_path, 'r', encoding='utf-8') as f:
 
     for line in f:
-        juicio_id, clave, fecha_str, abogado, expId = line.split(';')
+        juicio_id, clave, fecha_str, abogado, sys_cliente_id, expId = line.split(';')
         ids.append(juicio_id)
         claves.append(clave.strip())
         fechas.append(datetime.strptime(fecha_str.strip(), "%Y-%m-%d").strftime("%Y-%m-%d %H:%M:%S"))
-        abogados.append(limpiar_nombre_abogado(abogado))
+        abogados.append(limpiar_nombre_abogado(abogado))  # verificar, me parece que este llamado a limpiar_nombre_abogado sobra
+        clientes.append(sys_cliente_id)
         ids_eje.append(expId.strip())
     print ( "A procesar " + str(len(claves)) + " expedientes" )
 
 contador = 0
-for juicio_id, clave, fecha, abogado, id_eje in zip(ids, claves, fechas, abogados,ids_eje):
+for juicio_id, clave, fecha, abogado, cliente, id_eje in zip(ids, claves, fechas, abogados, clientes,ids_eje):
     del driver.requests
     if (datos_tabla := procesar_clave(clave, id_eje)):
         #print ( 'datos tabla en main ')
         #print (datos_tabla)
-        insertar_en_buffer(juicio_id, clave, fecha, abogado, datos_tabla)
+        insertar_en_buffer(juicio_id, clave, fecha, abogado, cliente, datos_tabla)
         contador+=1
         if (contador % 50 == 0):
+            print(f"Ultima procesada : {clave}")  # Mostrar la clave que se está procesando
             print (' insertados ' + str(contador) + ' expedientes' )
             insertarBufferaBD(db_params, bufferActuacionesAInsertar,bufferActuacionesAInsertarSinFechaDiligenciamiento)
             insertarIdsenBD(db_params, bufferIds) 
@@ -293,5 +305,8 @@ for juicio_id, clave, fecha, abogado, id_eje in zip(ids, claves, fechas, abogado
 insertarIdsenBD(db_params, bufferIds)   
 insertarBufferaBD(db_params, bufferActuacionesAInsertar,bufferActuacionesAInsertarSinFechaDiligenciamiento)
 driver.quit()
-
+ahora = datetime.now()
+salida = open('horario.txt','a')
+salida.write(ahora.strftime("%d/%m/%Y, %H:%M:%S"))
+salida.close()
 print("Proceso completado.")
